@@ -1,0 +1,2 @@
+include ':firmata4j', ':usbSerialForAndroid', ':app'
+project(':usbSerialForAndroid').projectDir = new File('usb-serial-for-android/usbSerialForAndroid')

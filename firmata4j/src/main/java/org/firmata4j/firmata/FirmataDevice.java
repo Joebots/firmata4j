@@ -23,9 +23,16 @@
  */
 package org.firmata4j.firmata;
 
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbManager;
+
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialRuntimeException;
+
 import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,10 +44,6 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import jssc.SerialPort;
-import jssc.SerialPortEvent;
-import jssc.SerialPortEventListener;
-import jssc.SerialPortException;
 import org.firmata4j.I2CDevice;
 import org.firmata4j.IODevice;
 import org.firmata4j.IODeviceEventListener;
@@ -59,12 +62,13 @@ import static org.firmata4j.firmata.parser.FirmataToken.*;
  *
  * @author Oleg Kurbatov &lt;o.v.kurbatov@gmail.com&gt;
  */
-public class FirmataDevice implements IODevice, SerialPortEventListener {
+public class FirmataDevice implements IODevice {
 
+    private final UsbManager usbManager;
     private final BlockingQueue<byte[]> byteQueue = new ArrayBlockingQueue<>(128);
     private final FirmataParser parser = new FirmataParser(byteQueue);
     private final Thread parserExecutor = new Thread(parser, "firmata-parser-thread");
-    private final SerialPort port;
+    private final UsbSerialPort port;
     private final Set<IODeviceEventListener> listeners = Collections.synchronizedSet(new LinkedHashSet<IODeviceEventListener>());
     private final List<FirmataPin> pins = Collections.synchronizedList(new ArrayList<FirmataPin>());
     private final AtomicBoolean started = new AtomicBoolean(false);
@@ -74,6 +78,8 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
     private final Map<Byte, FirmataI2CDevice> i2cDevices = new HashMap<>();
     private volatile Map<String, Object> firmwareInfo;
     private volatile Map<Integer, Integer> analogMapping;
+    private Thread th_receive = null;
+    private static final int BAUDRATE_57600 = 57600;
     private static final long TIMEOUT = 15000L;
     private static final int DELAY = 15;
     private static final Logger LOGGER = LoggerFactory.getLogger(FirmataDevice.class);
@@ -81,10 +87,11 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
     /**
      * Constructs FirmataDevice instance on specified port.
      *
-     * @param portName the port name the device is connected to
+     * @param port the port the device is connected to
      */
-    public FirmataDevice(String portName) {
-        this.port = new SerialPort(portName);
+    public FirmataDevice(UsbManager usbManager, UsbSerialPort port) throws IOException {
+        this.usbManager = usbManager;
+        this.port = port;
     }
 
     @Override
@@ -112,24 +119,53 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
              */
             if (!port.isOpened()) {
                 try {
-                    port.openPort();
-                    port.setParams(
-                            SerialPort.BAUDRATE_57600,
-                            SerialPort.DATABITS_8,
-                            SerialPort.STOPBITS_1,
-                            SerialPort.PARITY_NONE);
-                } catch (SerialPortException ex) {
+                    UsbDeviceConnection connection = usbManager.openDevice(port.getDriver().getDevice());
+                    if (connection == null) {
+                        throw new IOException("Opening firmata device failed");
+                    }
+                    port.open(connection);
+                    port.setParameters(
+                            BAUDRATE_57600,
+                            UsbSerialPort.DATABITS_8,
+                            UsbSerialPort.STOPBITS_1,
+                            UsbSerialPort.PARITY_NONE);
+                } catch (UsbSerialRuntimeException ex) {
                 	parserExecutor.interrupt();
                     throw new IOException("Cannot start firmata device", ex);
                 }
             }
             try {
-                port.setEventsMask(SerialPort.MASK_RXCHAR);
-                port.addEventListener(this);
+                //port.setEventsMask(UsbSerialPort.MASK_RXCHAR);
+                //port.addEventListener(this);
                 sendMessage(FirmataMessageFactory.REQUEST_FIRMWARE);
-            } catch (SerialPortException | IOException ex) {
+            } catch (UsbSerialRuntimeException | IOException ex) {
                	parserExecutor.interrupt();
                 throw new IOException("Cannot start firmata device", ex);
+            }
+            if (this.th_receive == null) {
+                this.th_receive = new Thread(new Runnable() {
+                    public void run() {
+                    while (port.isOpened()) {
+                        try {
+                            byte buf[] = new byte[4096];
+                            int size = port.read(buf, 200);
+                            if (size > 0) {
+                                while (!byteQueue.offer(Arrays.copyOf(buf, size))) {
+                                    // trying to place bytes to queue until it succeeds
+                                }
+                            }
+                            Thread.sleep(10);
+                        } catch (IOException ex) {
+                            LOGGER.error("Cannot read from device", ex);
+                            //stop();
+                            //if (handler != null) handler.onClose();
+                        } catch (InterruptedException e) {
+                            //if (handler != null) handler.onError(e.toString());
+                        }
+                    }
+                    }
+                });
+                this.th_receive.start();
             }
         }
     }
@@ -225,21 +261,21 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
         }
         sendMessage(FirmataMessageFactory.stringMessage(message));
     }
-
+/*
     @Override
-    public void serialEvent(SerialPortEvent event) {
+    public void serialEvent(UsbSerialPortEvent event) {
         // queueing data from input buffer to processing by FSM logic
         if (event.isRXCHAR() && event.getEventValue() > 0) {
             try {
                 while (!byteQueue.offer(port.readBytes())) {
                     // trying to place bytes to queue until it succeeds
                 }
-            } catch (SerialPortException ex) {
+            } catch (UsbSerialRuntimeException ex) {
                 LOGGER.error("Cannot read from device", ex);
             }
         }
     }
-
+*/
     /**
      * Sends the message to connected Firmata device using open port.<br/>
      * This method is package-wide accessible to be used by {@link FirmataPin}.
@@ -249,8 +285,8 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
      */
     void sendMessage(byte[] msg) throws IOException {
         try {
-            port.writeBytes(msg);
-        } catch (SerialPortException ex) {
+            port.write(msg, 100);
+        } catch (UsbSerialRuntimeException ex) {
             throw new IOException("Cannot send message to device", ex);
         }
     }
@@ -299,9 +335,9 @@ public class FirmataDevice implements IODevice, SerialPortEventListener {
         try {
             sendMessage(FirmataMessageFactory.analogReport(false));
             sendMessage(FirmataMessageFactory.digitalReport(false));
-            port.purgePort(SerialPort.PURGE_RXCLEAR | SerialPort.PURGE_TXCLEAR);
-            port.closePort();
-        } catch (SerialPortException ex) {
+            port.purgeHwBuffers(true, true);
+            port.close();
+        } catch (UsbSerialRuntimeException ex) {
             throw new IOException("Cannot properly stop firmata device", ex);
         }
     }
