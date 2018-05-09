@@ -487,8 +487,8 @@ public class FirmataDevice implements IODevice {
     }
 
     private void onI2cMessageReceive(Event event) {
-        byte address = (Byte) event.getBodyItem(I2C_ADDRESS);
-        int register = (Integer) event.getBodyItem(I2C_REGISTER);
+        byte address = (byte) event.getBodyItem(I2C_ADDRESS);
+        byte register = (byte) event.getBodyItem(I2C_REGISTER);
         byte[] message = (byte[]) event.getBodyItem(I2C_MESSAGE);
         FirmataI2CDevice device = i2cDevices.get(address);
         if (device != null) {

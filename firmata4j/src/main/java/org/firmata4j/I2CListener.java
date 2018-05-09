@@ -29,8 +29,7 @@ package org.firmata4j;
  * 
  * @author Oleg Kurbatov &lt;o.v.kurbatov@gmail.com&gt;
  */
-public interface I2CListener {
-    
-    public void onReceive(I2CEvent event);
-    
+public interface I2CListener extends Comparable<I2CListener> {
+
+    void onReceive(I2CEvent event);
 }
